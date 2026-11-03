@@ -1,0 +1,3 @@
+# 一律以 LF 检出：角色卡解析按 "\n" 切分标题，CRLF 会让 〔一代〕/〔二代〕 标记失效
+# （Git for Windows 的系统级 core.autocrlf=true 默认会把工作区换成 CRLF）
+* text=auto eol=lf
