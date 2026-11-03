@@ -1,0 +1,7 @@
+state/
+node_modules/
+*.tmp
+
+# 个人角色卡不入公开仓库，只保留中性示例卡
+roles/*.md
+!roles/example.md
