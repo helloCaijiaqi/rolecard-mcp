@@ -54,6 +54,16 @@ test('一代模式取到一代小节，取不到二代小节', () => {
   assert.ok(!v1Text.includes('工具协议'));
 });
 
+test('CRLF 卡片（记事本保存）与 LF 卡片解析结果一致', () => {
+  const crlf = CARD.replace(/\n/g, '\r\n');
+  // 标题必须照样被识别成小节，否则整张卡会退化成一个 all 小节
+  const headings = (text) => parseRoleSections(text).filter((s) => s.heading).map((s) => `${s.heading}=${s.mode}`);
+  assert.deepEqual(headings(crlf), headings(CARD));
+  assert.equal(selectRoleText(crlf, 'v2'), selectRoleText(CARD, 'v2'), 'CRLF 下二代不得混入一代小节');
+  assert.ok(!selectRoleText(crlf, 'v2').includes('\r'), '注入文本不得带 \\r');
+  assert.equal(roleCharStats(crlf).total, roleCharStats(CARD).total, 'CRLF 不该让字符统计多出每行的 \\r');
+});
+
 test('字符统计区分公共段与各模式专属段', () => {
   const stats = roleCharStats(CARD);
   assert.ok(stats.v1Only > 0 && stats.v2Only > 0);
