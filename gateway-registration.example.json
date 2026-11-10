@@ -1,0 +1,52 @@
+{
+  "v": 1,
+  "id": "7711223a7ad64712bca2ecdcc2675b8f",
+  "name": "rolecard-mcp",
+  "kind": "decorator",
+  "transport": "auto",
+  "url": "http://127.0.0.1:7182",
+  "secretEnv": "ROLECARD_MCP_GATEWAY_SECRET",
+  "tools": [
+    {
+      "name": "chat_role_render",
+      "description": "渲染当前角色卡为人格注入段（【人格】），mode=v1/v2 选择取用模式",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mode": { "type": "string", "enum": ["v1", "v2"] },
+          "maxChars": { "type": "integer", "minimum": 1 },
+          "name": { "type": "string", "description": "角色名，缺省取当前角色" }
+        }
+      },
+      "roles": ["tool", "decorator"]
+    },
+    {
+      "name": "chat_role_list",
+      "description": "列出可用角色与当前角色",
+      "inputSchema": { "type": "object", "properties": {} },
+      "roles": ["tool"]
+    },
+    {
+      "name": "chat_role_get",
+      "description": "读取角色卡原文（缺省当前角色）",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "name": { "type": "string" } }
+      },
+      "roles": ["tool"]
+    },
+    {
+      "name": "chat_role_sections",
+      "description": "角色卡小节级报告（解释每段为何被/未被注入）",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "mode": { "type": "string", "enum": ["v1", "v2"] }
+        }
+      },
+      "roles": ["tool"]
+    }
+  ],
+  "enabled": true
+}

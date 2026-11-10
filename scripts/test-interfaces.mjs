@@ -48,6 +48,10 @@ test('HTTP：健康检查免令牌，业务路由要令牌', async () => {
   await withApi(async ({ port, token }) => {
     const health = await fetch(`http://127.0.0.1:${port}/api/health`);
     assert.equal(health.status, 200);
+    const healthBody = await health.json();
+    // 免令牌端点不能回显「当前在跟谁聊」：角色名要带令牌走 /api/state。
+    assert.equal(healthBody.stats?.current, undefined);
+    assert.equal(typeof healthBody.stats?.roles, 'number');
     assert.equal((await call(port, '/api/roles', {})).status, 401);
     const okRes = await call(port, '/api/roles', {}, { 'x-mcp-token': token });
     assert.equal(okRes.status, 200);

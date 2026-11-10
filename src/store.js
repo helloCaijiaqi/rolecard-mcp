@@ -13,9 +13,15 @@
 //    ② 同名原地重写若长度变了（大多数编辑都会），size 变化也能击穿缓存。
 //    代价只是多几次 stat，比"热注入路径上一直发旧人格"划算得多。
 import fs from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
 const FILE_MODE = 0o600;
+/**
+ * 缓存上限。key 带 mtime+size，每次保存/编辑都会产生新条目——不设上限时
+ * 长时间运行（控制台反复改卡）会一直涨。命中时把条目移到队尾（近似 LRU）。
+ */
+const CACHE_MAX_ENTRIES = 64;
 
 export function sanitizeRoleName(name) {
   return String(name ?? '').replace(/[^\w一-龥-]/g, '');
@@ -24,9 +30,16 @@ export function sanitizeRoleName(name) {
 function atomicWrite(filePath, text) {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
-  const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, text, { encoding: 'utf8', mode: FILE_MODE });
-  fs.renameSync(tmp, filePath);
+  // 随机后缀：同一进程并发写同一张卡（控制台 + API）时，固定 pid 的 tmp 名会互相
+  // 覆盖/rename 失败；失败路径还要清掉半成品，别在 roles/ 里留垃圾。
+  const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+  try {
+    fs.writeFileSync(tmp, text, { encoding: 'utf8', mode: FILE_MODE });
+    fs.renameSync(tmp, filePath);
+  } catch (error) {
+    try { fs.unlinkSync(tmp); } catch { /* 已不存在 */ }
+    throw error;
+  }
 }
 
 export function createRoleStore({ rolesDir, stateDir } = {}) {
@@ -69,9 +82,15 @@ export function createRoleStore({ rolesDir, stateDir } = {}) {
       const stat = fs.statSync(full);
       const key = `${sanitizeRoleName(name)}:${stat.mtimeMs}:${stat.size}`;
       const hit = cache.get(key);
-      if (hit !== undefined) return hit;
+      if (hit !== undefined) {
+        // 命中即续期（Map 保插入序，等价于 LRU）。
+        cache.delete(key);
+        cache.set(key, hit);
+        return hit;
+      }
       const raw = fs.readFileSync(full, 'utf8');
       cache.set(key, raw);
+      while (cache.size > CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value);
       return raw;
     } catch {
       return '';

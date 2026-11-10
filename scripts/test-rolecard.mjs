@@ -135,6 +135,37 @@ test('render 超限会截断并显式告知', () => {
   assert.ok(out.blocks[0].text.includes('已截断'));
 });
 
+test('render 的 maxChars 非法值（NaN/0/负数/字符串）回退默认，绝不「不截断」', () => {
+  const { service, store } = makeService();
+  // 超过默认上限（4000）的长卡：NaN 时旧实现 `length > NaN` 恒 false，整卡都会进提示词。
+  fs.writeFileSync(
+    path.join(store.rolesDir, '傲娇助手.md'),
+    `# 傲娇助手\n\n## 你是谁\n- ${'很长的设定'.repeat(1200)}\n`,
+    'utf8',
+  );
+  service.setCurrent({ name: '傲娇助手' });
+  for (const bad of [Number.NaN, 'abc', 0, -5, {}]) {
+    const out = service.render({ mode: 'v2', maxChars: bad });
+    assert.equal(out.truncated, true, `maxChars=${String(bad)} 必须回退默认并正常截断`);
+    assert.ok(out.blocks[0].text.length <= 4000, '回退到默认 4000 上限');
+  }
+});
+
+test('缓存有界：反复改卡不会无限累积条目', () => {
+  const { store } = makeService();
+  for (let i = 0; i < 120; i += 1) {
+    fs.writeFileSync(
+      path.join(store.rolesDir, '傲娇助手.md'),
+      `# 傲娇助手\n\n## 你是谁\n- 第 ${i} 版人设，长度 ${'x'.repeat(i)}。\n`,
+      'utf8',
+    );
+    store.readRole('傲娇助手');
+  }
+  // 缓存上限 64（内部实现），只断言「不随版本数线性增长」。
+  const { cacheEntries } = store.stats();
+  assert.ok(cacheEntries <= 64, `缓存条目应被限制，实际 ${cacheEntries}`);
+});
+
 test('小节报告可用于解释"这段为什么没注入"', () => {
   const { service } = makeService();
   service.setCurrent({ name: '傲娇助手' });

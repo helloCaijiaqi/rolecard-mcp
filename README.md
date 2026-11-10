@@ -69,6 +69,22 @@ npm run install:dsh -- --remove  # 卸载
 
 详见 qq-bridge 的 `docs/guides/ROLECARD_MCP.md`。
 
+## 网关 WS 长连接（V2 主线）
+
+`service.call` / `tool.call` 默认由网关走 HTTP 端点投递；配了 WS 长连接后，同一组
+处理函数改由 `/v1/ws` 帧调用（业务零改动，见 `src/service/ws-connector.js`）。
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `ROLECARD_MCP_GATEWAY_SECRET` | 网关共享密钥（必填，≥16 字符；与登记文件 `secretEnv` 同源） |
+| `ROLECARD_MCP_GATEWAY_ID` | 登记文件 id（打开 WS 时必填） |
+| `ROLECARD_MCP_GATEWAY_WS_URL` | 网关基址（如 `http://127.0.0.1:8787`）；留空 = 不建连接（纯 HTTP） |
+| `ROLECARD_MCP_GATEWAY_TRANSPORT` | `ws` 或 `auto`（默认 `auto`）；非法值启动即失败 |
+
+部署前提（缺一即握手 401）：网关 `GATEWAY_WS=on`；登记目录里本服务条目存在且
+secret 一致；`transport` 建议改 `auto`（有 WS 连接走帧、否则回落 HTTP）。
+连接断开期间网关自动回落 HTTP，无需人工切换；服务侧断线按 1s→30s 退避重连。
+
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。

@@ -33,7 +33,19 @@ async function readBody(req) {
   return parsed && typeof parsed === 'object' ? parsed : {};
 }
 
-export function createHttpApi({ role, token, host = '127.0.0.1', port = 7182, logger } = {}) {
+/** /v1 端点专用：返回原始 body 文本（HMAC 签名必须对原始字节算）。 */
+async function readRawBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) throw new Error('请求体过大（上限 1MB）');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+export function createHttpApi({ role, token, gateway, host = '127.0.0.1', port = 7182, logger } = {}) {
   const log = logger ?? (() => {});
   const startedAt = Date.now();
   const routes = new Map([
@@ -54,8 +66,22 @@ export function createHttpApi({ role, token, host = '127.0.0.1', port = 7182, lo
         return;
       }
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      // 网关 V2 端点：验签要原始 body，先于通用 readBody 分支（不走 x-mcp-token 通道）。
+      if (gateway && (url.pathname === '/v1/service/call' || url.pathname === '/v1/tools/call')) {
+        if (req.method !== 'POST') {
+          json(res, 405, { error: `不支持的方法：${req.method}` });
+          return;
+        }
+        const rawBody = await readRawBody(req);
+        const { status, body } = await gateway.handle({ path: url.pathname, headers: req.headers, rawBody });
+        json(res, status, body);
+        return;
+      }
       if (url.pathname === '/api/health') {
         // 与 memory-mcp 同一形状：版本、pid、端口、成活时长；不含业务内容，所以免令牌。
+        // 但 `stats.current` 是当前加载的角色名（用户内容）：免令牌端点不该回显
+        // 「这个人现在在跟谁聊」。名字走带令牌的 /api/state。
+        const { roles, cacheEntries } = role.stats();
         json(res, 200, {
           ok: true,
           service: 'rolecard-mcp',
@@ -63,7 +89,7 @@ export function createHttpApi({ role, token, host = '127.0.0.1', port = 7182, lo
           pid: process.pid,
           port: server.address()?.port ?? port,
           uptimeMs: Date.now() - startedAt,
-          stats: role.stats(),
+          stats: { roles, cacheEntries },
         });
         return;
       }
