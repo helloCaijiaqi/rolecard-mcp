@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createRoleStore } from './store.js';
 import { createRoleService } from './service/role-service.js';
 import { createGatewayAuth, createGatewayV1 } from './service/gateway-v1.js';
-import { createGatewayWsConnector } from './service/ws-connector.js';
+import { createGatewayWatcher } from './gateway-watch.js';
 import { createHttpApi } from './http-api.js';
 import { serveStdio } from './mcp-rolecard.js';
 
@@ -24,21 +24,10 @@ export function resolveConfig(env = process.env) {
     host: '127.0.0.1',
     token: env.ROLECARD_MCP_TOKEN ?? '',
     tokenFile: path.join(stateDir, 'http-token'),
-    // 网关 V2 接入（/v1 端点）：secret 与网关登记文件的 secret 同源；gatewayId =
-    // 登记文件 id（32 位 hash，可选——不设则只验签名不比对身份头）。
-    gatewaySecret: env.ROLECARD_MCP_GATEWAY_SECRET ?? '',
-    gatewayId: env.ROLECARD_MCP_GATEWAY_ID ?? '',
-    // 网关 WS 长连接（V2 主线）：URL 非空即启用连接器（service.call / tool.call 走帧）。
-    // transport 只允许 ws|auto（fail-closed：非法值启动即失败）；权威选路仍在网关
-    // service-registry（登记文件 transport 字段），这里只是连接器口径。
-    gatewayWsUrl: env.ROLECARD_MCP_GATEWAY_WS_URL ?? '',
-    gatewayTransport: (() => {
-      const value = env.ROLECARD_MCP_GATEWAY_TRANSPORT ?? 'auto';
-      if (value !== 'ws' && value !== 'auto') {
-        throw new Error(`ROLECARD_MCP_GATEWAY_TRANSPORT 只支持 ws|auto（got "${value}"）`);
-      }
-      return value;
-    })(),
+    // 网关接入：唯一来源是仓库根目录的 gateway.json——但不在 resolveConfig 里
+    // 读取（启动期一次性绑定是「注册后必须重启」的根源）。改由 start() 里的
+    // createGatewayWatcher 热加载：文件出现/修复/变更 ≤2s 自动生效。旧
+    // *_GATEWAY_* 环境变量已退役，设置了会直接报错（检测挪进 watcher）。
   };
 }
 
@@ -69,32 +58,71 @@ export async function start({ env = process.env, stdio = true, http: withHttp = 
   const store = createRoleStore({ rolesDir: cfg.rolesDir, stateDir: cfg.stateDir });
   const role = createRoleService({ store });
 
-  // 网关 V2 接入面：配了密钥才创建（未配 = /v1 端点整体缺席）。
-  const gateway = cfg.gatewaySecret
-    ? createGatewayV1({
-      auth: createGatewayAuth({ secret: cfg.gatewaySecret, serviceId: cfg.gatewayId || undefined }),
-      role,
-      logger: log,
-    })
-    : null;
+  // 网关接入面（热加载）：gateway.json 出现/修复/变更 ≤2s 自动生效，无需重启。
+  // /v1/tools/call 常挂载——未生效时返回 503 带文案，而不是端点整体缺席。
+  const gatewayWatcher = createGatewayWatcher({ root: PKG_ROOT, env, envPrefix: 'ROLECARD_MCP_', logger: log });
 
-  // 网关 WS 长连接：配置了 URL 就必须给齐 id/secret（fail-closed，不静默退回 HTTP）。
-  // 连接器挂 `invoke`（免验签分发，与 HTTP 入口同一组处理函数）。
-  if (cfg.gatewayWsUrl) {
-    if (!cfg.gatewaySecret) throw new Error('ROLECARD_MCP_GATEWAY_WS_URL 已设置，但缺少 ROLECARD_MCP_GATEWAY_SECRET');
-    if (!cfg.gatewayId) throw new Error('ROLECARD_MCP_GATEWAY_WS_URL 已设置，但缺少 ROLECARD_MCP_GATEWAY_ID（登记文件 id）');
-    if (!gateway) throw new Error('网关 WS 连接器需要 /v1 接入面（gateway-v1）已装配');
-  }
-  const wsConnector = gateway && cfg.gatewayWsUrl
-    ? createGatewayWsConnector({
-      url: cfg.gatewayWsUrl,
-      serviceId: cfg.gatewayId,
-      secret: cfg.gatewaySecret,
-      transport: cfg.gatewayTransport,
-      invoke: gateway.invoke,
-      logger: log,
-    })
-    : null;
+  // 内部 handler 惰性装配：首个有效配置出现时创建（auth 持有 nonce 防重放表）；
+  // 之后配置变更走 auth.rotate 原地换密钥——防重放窗口不重置，业务依赖不重建。
+  let gatewayInner = null;
+  let gatewayAuthHandle = null;
+  const ensureGatewayHandler = (config) => {
+    if (!gatewayInner) {
+      gatewayAuthHandle = createGatewayAuth({ secret: config.secret, serviceId: config.id || undefined });
+      gatewayInner = createGatewayV1({ auth: gatewayAuthHandle, role, logger: log });
+    } else {
+      gatewayAuthHandle.rotate({ secret: config.secret, serviceId: config.id || undefined });
+    }
+    return gatewayInner;
+  };
+
+  // 传输按角色非对称：资源服务纯被动（网关 → 本服务的 HTTP tool.call 是唯一
+  // 通道，WS 能力已退役），接入生效就必须给齐 id/secret（tool.call 验签要）。
+  // 读取器 + watcher 已保证 config 存在时字段齐全。
+  const gateway = {
+    async handle({ path, headers, rawBody }) {
+      const { config, error } = gatewayWatcher.current();
+      if (!config) {
+        return {
+          status: 503,
+          body: {
+            error: `网关接入未生效（${error ? `gateway.json 非法：${error}` : '未找到 gateway.json'}）。`
+              + '把网关生成的 handoff/<id>.gateway.json 复制到本仓库根目录命名 gateway.json，'
+              + '≤2s 自动热加载，无需重启。',
+          },
+        };
+      }
+      return ensureGatewayHandler(config).handle({ path, headers, rawBody });
+    },
+
+    /**
+     * /v1/bootstrap（2026-11-20，免认证——鸡生蛋：调用方拿 secret 前无法签名）。
+     * DSH persona 插件（rolecard-persona）启动时拉取连接配置：toolCallPath /
+     * adapterId（验签必需的身份头）/ secret——全部 gateway.json 单源，热加载
+     * 自动跟随。安全边界=回环 HTTP 守卫（LOOPBACK）；secret 明文经环回吐出
+     * 与 gateway.json/密钥文件落盘同级（单用户主机本地可信模型）。
+     */
+    async bootstrap() {
+      const { config, error } = gatewayWatcher.current();
+      if (!config) {
+        return {
+          status: 503,
+          body: { error: `网关接入未生效（${error ?? '未找到 gateway.json'}），bootstrap 不可用` },
+        };
+      }
+      return {
+        status: 200,
+        body: { v: 1, toolCallPath: '/v1/tools/call', adapterId: config.id, secret: config.secret },
+      };
+    },
+  };
+
+  const initialGateway = gatewayWatcher.current();
+  log(initialGateway.config
+    ? `网关接入：${initialGateway.file}（id=${initialGateway.config.id} auth=${initialGateway.config.auth} `
+      + `transport=${initialGateway.config.transport}；热加载 ≤2s，无需重启）`
+    : `网关接入：未生效（${initialGateway.error ? `gateway.json 非法：${initialGateway.error}` : '未找到 gateway.json'}）；`
+      + '放入/修复后自动热加载，无需重启；stdio MCP 照常可用');
 
   const api = withHttp ? createHttpApi({ role, token, gateway, host: cfg.host, port: cfg.port, logger: log }) : null;
   // 与 memory-mcp 同一策略：端口抢不到只降级 HTTP，stdio（DSH 的工具面）照常接管。
@@ -109,21 +137,23 @@ export async function start({ env = process.env, stdio = true, http: withHttp = 
       log(`回环 HTTP 未启动（${error.code} ${cfg.host}:${cfg.port}）：已降级为 stdio-only，MCP 工具仍可用；qq-bridge 将回落本地人格卡`);
     }
   }
-  if (wsConnector) {
-    // 与本地 HTTP 端口无关：端口冲突降级 stdio-only 时 WS 长连接仍可工作。
-    wsConnector.start();
-    const status = wsConnector.status();
-    log(`网关 WS 连接器已启动：${status.endpoint}（service=${status.serviceId} transport=${status.transport}）`);
-  }
-  // 统一退出：停连接器 → 关 HTTP server。旧实现只 stop 连接器，stdio 的 stdin
+  // 统一退出：关 HTTP server。旧实现只 stop 连接器，stdio 的 stdin
   // 还开着导致进程不退出（Ctrl+C 后要再按一次）。
   let shuttingDown = false;
   const shutdown = async (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    log(`收到 ${signal}，正在关闭（ws/http）…`);
-    try { wsConnector?.stop(); } catch { /* 已停 */ }
-    try { if (api && !httpError) await api.close(); } catch { /* 已关 */ }
+    log(`收到 ${signal}，正在关闭（http）…`);
+    // 2026-11-21 审计修复：close 兜底超时——api.close() 理论上会因
+    // closeIdleConnections 生效而快速返回，但任何 keep-alive 连接正处于
+    // 中间态时仍可能卡住；3s 后强制退出，不让 shutdown 悬挂。
+    try {
+      await Promise.race([
+        (async () => { if (api && !httpError) await api.close(); })(),
+        new Promise((resolve) => setTimeout(resolve, 3000)),
+      ]);
+    } catch { /* 已关 */ }
+    try { gatewayWatcher.stop(); } catch { /* 已关 */ }
     process.exit(0);
   };
   process.once('SIGINT', () => { void shutdown('SIGINT'); });
@@ -132,7 +162,7 @@ export async function start({ env = process.env, stdio = true, http: withHttp = 
     await serveStdio({ role });
     log('stdio MCP 已连接');
   }
-  return { cfg, store, role, api: httpError ? null : api, token, httpError, wsConnector };
+  return { cfg, store, role, api: httpError ? null : api, token, httpError, gatewayWatcher };
 }
 
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

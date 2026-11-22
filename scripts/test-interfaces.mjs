@@ -120,7 +120,12 @@ test('stdio MCP：能握手，且暴露约定的工具', async () => {
   const listPayload = payloads.find((item) => Array.isArray(item.result?.tools));
   assert.ok(listPayload, '应返回工具列表');
   const names = listPayload.result.tools.map((tool) => tool.name);
-  for (const expected of ['role_list', 'role_get', 'role_set_current', 'role_clear_current', 'role_sections', 'role_context_render']) {
+  // 工具面口径（与网关侧 chat_role_* 4 对 4 一致）：切换不注册进 MCP
+  //（模型不可见，走回环 HTTP /api/role/*）。
+  for (const expected of ['role_list', 'role_get', 'role_sections', 'role_context_render']) {
     assert.ok(names.includes(expected), `缺少工具 ${expected}，实际：${names.join('、')}`);
+  }
+  for (const removed of ['role_set_current', 'role_clear_current']) {
+    assert.ok(!names.includes(removed), `${removed} 不应再出现在 MCP 工具面（切换不公开给模型）`);
   }
 });

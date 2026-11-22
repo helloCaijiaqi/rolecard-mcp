@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rolecard-mcp · 角色卡管理</title>
+  <style>
+    /* Tailwind CSS CDN */
+    @import url('https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css');
+  </style>
+  <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body class="min-h-screen text-slate-200">
+  <header class="admin-header">
+    <div class="flex items-center gap-3">
+      <span class="logo-dot" aria-hidden="true"></span>
+      <h1 class="text-lg font-semibold tracking-wide">rolecard-mcp · 角色卡管理</h1>
+    </div>
+    <div id="current-badge" class="current-badge" hidden>
+      <span class="text-slate-400 text-xs">当前角色</span>
+      <strong id="current-name" class="text-sm">—</strong>
+    </div>
+  </header>
+
+  <main class="admin-shell">
+    <!-- 左：角色列表 -->
+    <section class="glass-card" aria-label="角色列表">
+      <h2 class="section-title">角色列表</h2>
+      <ul id="role-list" class="role-list" aria-live="polite">
+        <li class="text-slate-500 text-sm">加载中…</li>
+      </ul>
+    </section>
+
+    <!-- 右：编辑器 -->
+    <section class="glass-card" aria-label="角色卡编辑器">
+      <div id="editor-empty" class="text-slate-500 text-sm py-16 text-center">从左侧选择一张角色卡开始编辑</div>
+      <div id="editor" class="editor-wrap" hidden>
+        <h2 id="editor-name" class="section-title">—</h2>
+        <textarea id="editor-content" class="role-editor" spellcheck="false"
+                  placeholder="角色卡内容（Markdown）"></textarea>
+        <div class="editor-foot">
+          <span id="char-count" class="text-xs text-slate-500">0 字符</span>
+          <button id="btn-save" type="button" class="btn-primary">保存</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast-host" class="toast-host" aria-live="assertive"></div>
+  <script src="/admin/admin.js"></script>
+</body>
+</html>

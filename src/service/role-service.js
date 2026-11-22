@@ -63,6 +63,14 @@ export function createRoleService({ store, config = {} } = {}) {
       return { current: store.setCurrent(roleName) };
     },
 
+    /** 管理面透传（2026-11-20，控制台「角色卡」视图）：新建或整卡覆写。 */
+    writeRole({ name, content } = {}) {
+      const roleName = String(name ?? '').trim();
+      if (!roleName) throw new Error('角色名不能为空');
+      store.writeRole(roleName, String(content ?? ''));
+      return { name: roleName, chars: String(content ?? '').length };
+    },
+
     clearCurrent() {
       return { current: store.clearCurrent() };
     },

@@ -1,0 +1,14 @@
+{
+  "name": "rolecard-persona",
+  "version": "1.0.0",
+  "description": "rolecard-mcp 的 DSH persona 插件（跨平台公用）：assemble waterfall 拉角色卡渲染注入 system prompt。rootUrl 自描述直连——config 归零，启动拉 /v1/bootstrap 取 secret/adapterId 后 HMAC 直调。",
+  "type": "module",
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": [
+        "./patch.yml"
+      ]
+    }
+  }
+}

@@ -2,7 +2,7 @@
 
 角色卡 / 人格管理。与 qq-bridge **平级部署**，是 memory-mcp 的兄弟包，与 QQ 无关。
 
-- 角色卡读写（`roles/*.md`）、当前角色切换
+- 角色卡读写（`roles/*.md`）、当前角色（切换为部署期动作，见下）
 - 〔一代〕/〔二代〕 小节解析：先按标记筛掉另一模式的专属小节，再按注入上限截断
 - 产出可直接拼接的【人格】段
 - 读缓存 key 含 **文件名 + mtime + size**：只看 mtime 会在"同一 tick 内重写角色卡"时命中旧值
@@ -22,8 +22,14 @@ npm run install:dsh # 把 mcp-rolecard 登记进 DSH（--global / --check / --re
 
 | 入口 | 说明 |
 | --- | --- |
-| stdio MCP | `role_list / role_get / role_set_current / role_clear_current / role_sections / role_context_render` |
-| 回环 HTTP | 同上能力的 `/api/*` 路由；只监听 127.0.0.1，非回环 403，需本地令牌 |
+| stdio MCP | `role_list / role_get / role_sections / role_context_render`（4 工具） |
+| 回环 HTTP | 同上能力的 `/api/*` 路由 + 角色切换（`/api/role/current`、`/api/role/clear`）；只监听 127.0.0.1，非回环 403，需本地令牌 |
+| 网关 tool.call | `chat_role_render / chat_role_list / chat_role_get / chat_role_sections`（4 工具，HMAC 签名） |
+
+**两侧工具面 4 对 4 一致**（`chat_` 前缀映射 `role_*`；`chat_role_render` ≙ `role_context_render` 语义等价）：
+模型可见的工具不包含角色切换——切换不注册进 MCP/网关工具面，属部署期/运维动作，经回环 HTTP
+`POST /api/role/current`（`{"name":"角色名"}`）、`POST /api/role/clear` 或手改
+`state/current-role.json`（写 `{"role":"角色名"}`）完成。
 
 段落契约：
 
@@ -37,7 +43,7 @@ role_context_render({ mode: 'v1' | 'v2', maxChars })
 `roles/*.md` 是纯文本人格卡，文件名即角色名（`roles/我的角色.md` → `我的角色`）。仓库只带一张中性示例卡 `roles/example.md`：
 
 1. 复制示例卡改成自己的卡：`cp roles/example.md roles/我的角色.md`；
-2. 切到该角色：MCP 工具 `role_set_current({ role: '我的角色' })`，或直接在 `state/current-role.json` 写 `{"role":"我的角色"}`；
+2. 切到该角色（部署期动作，不占模型工具位）：直接在 `state/current-role.json` 写 `{"role":"我的角色"}`，或回环 HTTP `POST /api/role/current`（body `{"name":"我的角色"}`）；清除当前角色用 `POST /api/role/clear` 或删掉该文件；
 3. 以 `## 标题 〔一代〕` / `## 标题 〔二代〕` 结尾的小节只在该模式注入，无标记的小节两种模式都注入。
 
 个人角色卡默认被 `.gitignore` 排除（`roles/*.md` + `!roles/example.md`），不会被误提交。
@@ -69,21 +75,47 @@ npm run install:dsh -- --remove  # 卸载
 
 详见 qq-bridge 的 `docs/guides/ROLECARD_MCP.md`。
 
-## 网关 WS 长连接（V2 主线）
+## 网关接入（`gateway.json`）
 
-`service.call` / `tool.call` 默认由网关走 HTTP 端点投递；配了 WS 长连接后，同一组
-处理函数改由 `/v1/ws` 帧调用（业务零改动，见 `src/service/ws-connector.js`）。
+`tool.call`（唯一服务间信封；`service.call` 已全链路下线）的凭据与地址**只从仓库根目录的 `gateway.json` 读取**（不再读
+`*_GATEWAY_*` 环境变量——设了会直接报错，避免「改了却不生效」）。传输按角色非对称：资源服务纯被动，
+网关只经 HTTP `POST /v1/tools/call` 调用本服务（WS 能力已退役）。
 
-| 环境变量 | 说明 |
+网关侧登记（Agent-Gateway 控制台）：`kind=resource`、`transport=http`、`url` 填本服务地址
+（如 `http://127.0.0.1:7182`，仅回环）；secret 可留空由网关自动生成，交接文件
+`state/gateway/handoff/<登记id>.gateway.json` 直接拿去改名。登记文件禁止未知键
+（strictObject，残留 `capability` 之类直接拒载）。
+
+三步：
+
+```bash
+# ① 网关侧注册服务后生成（agent-gateway 仓库，控制台注册也会直接返回路径）
+npm run handoff -- --service <登记id>        # 或注册响应里的 handoffFile
+# ② 复制到本仓库根目录，保持文件名
+cp <gateway>/state/gateway/handoff/<登记id>.gateway.json ./gateway.json
+# ③ 启动（日志会打印读的是哪个文件、什么身份、密钥从哪来）
+npm start
+```
+
+| 字段 | 说明 |
 | --- | --- |
-| `ROLECARD_MCP_GATEWAY_SECRET` | 网关共享密钥（必填，≥16 字符；与登记文件 `secretEnv` 同源） |
-| `ROLECARD_MCP_GATEWAY_ID` | 登记文件 id（打开 WS 时必填） |
-| `ROLECARD_MCP_GATEWAY_WS_URL` | 网关基址（如 `http://127.0.0.1:8787`）；留空 = 不建连接（纯 HTTP） |
-| `ROLECARD_MCP_GATEWAY_TRANSPORT` | `ws` 或 `auto`（默认 `auto`）；非法值启动即失败 |
+| `v` | 固定 `1` |
+| `id` | 登记文件 id（32 位 hash 或可读 id）。与网关逐字一致，否则验签 401 |
+| `url` | **网关基址**（如 `http://127.0.0.1:7190`）。⚠️ 不是本服务地址 |
+| `transport` | 只支持 `http`（缺省同值）；资源服务纯被动，WS 已退役，配 `ws`/`auto` 启动即报错（带迁移文案） |
+| `secretFile` | 网关侧密钥文件的路径；相对路径按 `gateway.json` 所在目录解析 |
+| `secret` | 内联明文（跨机复制用）；与 `secretFile` 并存时以 `secretFile` 为准并告警 |
 
-部署前提（缺一即握手 401）：网关 `GATEWAY_WS=on`；登记目录里本服务条目存在且
-secret 一致；`transport` 建议改 `auto`（有 WS 连接走帧、否则回落 HTTP）。
-连接断开期间网关自动回落 HTTP，无需人工切换；服务侧断线按 1s→30s 退避重连。
+- **文件缺失 = 不接入网关**：`/v1` 不启用，stdio MCP（DSH 工具面）照常可用；启动日志与
+  `npm run preflight` 都会给出提示。
+- **热加载（2026-11-14 起）**：gateway.json 的出现、修复、换密钥 ≤2s 自动生效，**无需重启**。
+  /v1/tools/call 常挂载——未生效时返回 503 带修复文案。文件非法或被移除 → 网关接入摘除
+  （503）+ 告警日志；修复后自动恢复。变更检测按内容哈希轮询，网关重注册/换密钥重写文件即触发。
+- 文件存在但字段非法（如 `transport` 非 `http`）→ /v1 返回 503 摘除并告警（不带着坏凭据服务）；
+  修复后自动恢复，不再要求重启。
+- 部署前提（缺一即验签 401）：登记目录里有本服务且 secret 与 `gateway.json` 一致；
+  transport 须为 `http`（网关 → 本服务的 HTTP tool.call 是唯一通道）。
+- `gateway.json` 含凭据：已加入 `.gitignore`，模板见 `gateway.example.json`。
 
 ## 许可
 

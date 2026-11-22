@@ -1,5 +1,5 @@
-// 网关 V2 接入面测试：/v1/service/call + /v1/tools/call（HMAC 鉴权、装饰器契约、
-// 工具路由、业务失败透传、nonce 防重放）。全离线：role service 用内存假实现。
+// 网关接入面测试：/v1/tools/call（tool.call 唯一信封：HMAC 鉴权、decorator 契约
+// {sections}、工具路由、业务失败透传、nonce 防重放）。全离线：role service 用内存假实现。
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -64,12 +64,13 @@ function post(port, path, { headers = {}, body = '' }) {
   });
 }
 
-const serviceCallBody = JSON.stringify({
-  v: 1, callId: 'svc-1', service: REG_ID, step: 'chat_role_render', kind: 'decorator',
-  sessionKey: 'qq:group:123', text: '',
+// decorator 形态的 tool.call：args 恒 {}，context.senderId 可选（本服务不消费）。
+const decoratorCallBody = JSON.stringify({
+  v: 1, callId: 'svc-1', tool: 'chat_role_render', args: {},
+  sessionKey: 'qq:group:123', context: { senderId: 'u_1' },
 });
 const toolCallBody = JSON.stringify({
-  v: 1, callId: 'tool-1', tool: 'chat_role_list', args: {},
+  v: 1, callId: 'tool-1', tool: 'chat_role_list', args: {}, sessionKey: 'qq:group:123',
 });
 
 const gateway = createGatewayV1({
@@ -82,7 +83,7 @@ const { port } = await api.listen();
 
 try {
   await check('未签名请求 → 401', async () => {
-    const res = await post(port, '/v1/service/call', { body: serviceCallBody });
+    const res = await post(port, '/v1/tools/call', { body: decoratorCallBody });
     assert.equal(res.status, 401);
   });
 
@@ -92,22 +93,23 @@ try {
       body: toolCallBody,
     });
     assert.equal(bad.status, 401);
-    const headers = signRequest({ secret: SECRET, adapterId: REG_ID, body: serviceCallBody });
-    assert.equal((await post(port, '/v1/service/call', { headers, body: serviceCallBody })).status, 200);
-    assert.equal((await post(port, '/v1/service/call', { headers, body: serviceCallBody })).status, 401);
+    const headers = signRequest({ secret: SECRET, adapterId: REG_ID, body: decoratorCallBody });
+    assert.equal((await post(port, '/v1/tools/call', { headers, body: decoratorCallBody })).status, 200);
+    assert.equal((await post(port, '/v1/tools/call', { headers, body: decoratorCallBody })).status, 401);
   });
 
-  await check('service/call：人格块 sections（verdict=pass）', async () => {
-    const res = await post(port, '/v1/service/call', {
-      headers: signRequest({ secret: SECRET, adapterId: REG_ID, body: serviceCallBody }),
-      body: serviceCallBody,
+  await check('tools/call：decorator 契约（ok + sections，无 epoch）', async () => {
+    const res = await post(port, '/v1/tools/call', {
+      headers: signRequest({ secret: SECRET, adapterId: REG_ID, body: decoratorCallBody }),
+      body: decoratorCallBody,
     });
     assert.equal(res.status, 200);
     assert.equal(res.body.v, 1);
     assert.equal(res.body.callId, 'svc-1');
-    assert.equal(res.body.verdict, 'pass');
-    assert.equal(res.body.sections[0].name, '人格');
-    assert.ok(res.body.sections[0].text.includes('你是小红'));
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.data.sections[0].name, '人格');
+    assert.ok(res.body.data.sections[0].text.includes('你是小红'));
+    assert.equal('epoch' in res.body.data, false, 'rolecard 无会话纪元状态，不返回 epoch');
   });
 
   await check('tools/call：chat_role_list', async () => {
@@ -119,25 +121,30 @@ try {
     assert.deepEqual(res.body, { v: 1, callId: 'tool-1', ok: true, data: { roles: ['小红', '小明'], current: '小红' } });
   });
 
-  await check('tools/call：chat_role_get / sections / render', async () => {
-    for (const [tool, expect] of [
-      ['chat_role_get', (data) => data.name === '小红'],
-      ['chat_role_sections', (data) => Array.isArray(data.sections)],
-      ['chat_role_render', (data) => data.blocks[0].name === '人格'],
-    ]) {
-      const body = JSON.stringify({ v: 1, callId: `t-${tool}`, tool, args: {} });
-      const res = await post(port, '/v1/tools/call', {
-        headers: signRequest({ secret: SECRET, adapterId: REG_ID, body }),
-        body,
+  await check('tools/call：render（sessionKey 可选化后可不传）与已退役工具拒绝', async () => {
+    // render：DSH 插件直调的唯一入口——不传 sessionKey（2026-11-21 可选化）。
+    const body = JSON.stringify({ v: 1, callId: 't-render', tool: 'chat_role_render', args: {} });
+    const res = await post(port, '/v1/tools/call', {
+      headers: signRequest({ secret: SECRET, adapterId: REG_ID, body }),
+      body,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.data.sections[0].name, '人格');
+    // chat_role_get / sections / admin_* 已退役（2026-11-21 收敛）→ E_UNSUPPORTED。
+    for (const gone of ['chat_role_get', 'chat_role_sections', 'chat_role_admin_list', 'chat_role_admin_switch']) {
+      const goneBody = JSON.stringify({ v: 1, callId: `t-gone-${gone}`, tool: gone, args: {} });
+      const goneRes = await post(port, '/v1/tools/call', {
+        headers: signRequest({ secret: SECRET, adapterId: REG_ID, body: goneBody }),
+        body: goneBody,
       });
-      assert.equal(res.status, 200, tool);
-      assert.equal(res.body.ok, true, tool);
-      assert.ok(expect(res.body.data), tool);
+      assert.equal(goneRes.body.ok, false, gone);
+      assert.equal(goneRes.body.error.code, 'E_UNSUPPORTED', gone);
     }
   });
 
   await check('tools/call：未知工具 → ok:false E_UNSUPPORTED', async () => {
-    const body = JSON.stringify({ v: 1, callId: 't-bad', tool: 'chat_role_nope', args: {} });
+    const body = JSON.stringify({ v: 1, callId: 't-bad', tool: 'chat_role_nope', args: {}, sessionKey: 'qq:group:123' });
     const res = await post(port, '/v1/tools/call', {
       headers: signRequest({ secret: SECRET, adapterId: REG_ID, body }),
       body,
@@ -147,7 +154,7 @@ try {
   });
 
   await check('契约错误（缺 callId）→ 400；坏 JSON → 400', async () => {
-    const missing = JSON.stringify({ v: 1, tool: 'chat_role_get', args: {} });
+    const missing = JSON.stringify({ v: 1, tool: 'chat_role_list', args: {} });
     const a = await post(port, '/v1/tools/call', {
       headers: signRequest({ secret: SECRET, adapterId: REG_ID, body: missing }),
       body: missing,
@@ -183,6 +190,51 @@ try {
 } finally {
   await api.close();
 }
+
+// ── 热加载：auth.rotate 原地换密钥（gateway.json 热加载的地基，与 memory-mcp 同口径）──
+await check('rotate：换密钥后旧签名 401、新签名通过', async () => {
+  const auth = createGatewayAuth({ secret: SECRET, serviceId: REG_ID });
+  const gateway = createGatewayV1({ auth, role: fakeRole });
+  const oldSig = signRequest({ secret: SECRET, adapterId: REG_ID, body: decoratorCallBody });
+  assert.equal((await gateway.handle({ path: '/v1/tools/call', headers: oldSig, rawBody: decoratorCallBody })).status, 200);
+
+  const NEXT = 'rotated-shared-secret-0123456789';
+  auth.rotate({ secret: NEXT, serviceId: REG_ID });
+  // 旧密钥签名（换掉 secret 但换新 nonce）→ 401：密钥真的换掉了。
+  const stale = signRequest({ secret: SECRET, adapterId: REG_ID, body: decoratorCallBody });
+  assert.equal((await gateway.handle({ path: '/v1/tools/call', headers: stale, rawBody: decoratorCallBody })).status, 401);
+  // 新密钥签名 → 200；业务 handler 未重建（同一个 gateway 实例继续工作）。
+  const fresh = signRequest({ secret: NEXT, adapterId: REG_ID, body: decoratorCallBody });
+  assert.equal((await gateway.handle({ path: '/v1/tools/call', headers: fresh, rawBody: decoratorCallBody })).status, 200);
+});
+
+await check('rotate：serviceId 一并轮换；过短密钥整体拒收（保留旧值）', async () => {
+  const auth = createGatewayAuth({ secret: SECRET, serviceId: 'id-a' });
+  const gateway = createGatewayV1({ auth, role: fakeRole });
+  const wrongId = signRequest({ secret: SECRET, adapterId: 'id-b', body: decoratorCallBody });
+  assert.equal((await gateway.handle({ path: '/v1/tools/call', headers: wrongId, rawBody: decoratorCallBody })).status, 401);
+
+  assert.throws(() => auth.rotate({ secret: 'short' }), /至少 16 字符/);
+  // 拒收后旧值仍在：id-a + 旧密钥照常通过。
+  const stillOld = signRequest({ secret: SECRET, adapterId: 'id-a', body: decoratorCallBody });
+  assert.equal((await gateway.handle({ path: '/v1/tools/call', headers: stillOld, rawBody: decoratorCallBody })).status, 200);
+
+  auth.rotate({ secret: SECRET, serviceId: 'id-b' });
+  const withNewId = signRequest({ secret: SECRET, adapterId: 'id-b', body: decoratorCallBody });
+  assert.equal((await gateway.handle({ path: '/v1/tools/call', headers: withNewId, rawBody: decoratorCallBody })).status, 200);
+});
+
+await check('rotate：换密钥不重置防重放 nonce 窗口', async () => {
+  const auth = createGatewayAuth({ secret: SECRET, serviceId: REG_ID });
+  const gateway = createGatewayV1({ auth, role: fakeRole });
+  const nonce = crypto.randomBytes(12).toString('hex');
+  const headers = signRequest({ secret: SECRET, adapterId: REG_ID, body: decoratorCallBody, nonce });
+  assert.equal((await gateway.handle({ path: '/v1/tools/call', headers, rawBody: decoratorCallBody })).status, 200);
+  auth.rotate({ secret: 'rotated-shared-secret-0123456789', serviceId: REG_ID });
+  // 同一 nonce 用新密钥重签 → 依然 401：轮换不重置防重放窗口。
+  const replay = signRequest({ secret: 'rotated-shared-secret-0123456789', adapterId: REG_ID, body: decoratorCallBody, nonce });
+  assert.equal((await gateway.handle({ path: '/v1/tools/call', headers: replay, rawBody: decoratorCallBody })).status, 401);
+});
 
 console.log(`\nℹ tests ${passed + failed}\nℹ pass ${passed}\nℹ fail ${failed}`);
 process.exitCode = failed > 0 ? 1 : 0;

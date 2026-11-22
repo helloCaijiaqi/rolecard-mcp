@@ -1,0 +1,7 @@
+# 顶层插件 entry（2026-11-20 独立化 + 去平台化）：对全部 agent 会话生效，与 preset 解耦。
+# entry 单一事实源 = 本文件——绝不字面追加 profile cordis.patch.yml（DSH 组装
+# 全拼接不去重，双写会双实例化）。config 归零：插件内联回环约定地址
+# http://127.0.0.1:7182，启动拉 /v1/bootstrap 取 secret/adapterId 后直调 rolecard。
+- id: rolecard-persona
+  name: 'rolecard-persona/rolecard-persona.mjs'
+  config: {}

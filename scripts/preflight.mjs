@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { loadGatewayConfig } from '../src/gateway-config.js';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REQUIRED_MAJOR = 24;
@@ -140,6 +141,23 @@ function checkPort(host, port) {
   });
 }
 
+/**
+ * 网关接入：只报告「读到了没有、身份是谁、密钥从哪来」，不打印密钥。
+ * 缺失 = 提醒（可作为纯 stdio MCP 用）；文件非法 / 残留旧环境变量 = 失败。
+ */
+function checkGateway(env) {
+  try {
+    const gateway = loadGatewayConfig({ root: PKG_ROOT, env, envPrefix: 'ROLECARD_MCP_' });
+    if (!gateway) {
+      record('warn', '网关接入', `未发现 ${path.join(PKG_ROOT, 'gateway.json')}：不接入网关（stdio MCP 照常可用）`);
+      return;
+    }
+    record('ok', '网关接入', `${gateway.file}（id=${gateway.id} auth=${gateway.auth} transport=${gateway.transport}）`);
+  } catch (error) {
+    record('fail', '网关接入', error?.message ?? String(error));
+  }
+}
+
 export async function preflight({ env = process.env, logger = console.log } = {}) {
   const stateDir = path.resolve(env.ROLECARD_MCP_STATE_DIR ?? path.join(PKG_ROOT, 'state'));
   const rolesDir = path.resolve(env.ROLECARD_MCP_ROLES_DIR ?? path.join(PKG_ROOT, 'roles'));
@@ -151,6 +169,7 @@ export async function preflight({ env = process.env, logger = console.log } = {}
   checkWritable('状态目录', stateDir);
   checkToken(path.join(stateDir, 'http-token'));
   checkDshEntry(env);
+  checkGateway(env);
   await checkPort('127.0.0.1', port);
 
   const failed = results.filter((r) => r.level === 'fail').length;

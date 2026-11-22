@@ -1,4 +1,9 @@
 // stdio MCP server：把角色卡能力暴露成工具，供 DSH（任何 MCP 客户端）调用。
+//
+// 工具面口径（与网关侧 chat_role_* 4 对 4 一致）：role_list / role_get /
+// role_sections / role_context_render。角色切换（setCurrent/clearCurrent）
+// **不注册进 MCP 工具面**（模型不可见）——切换属部署期/运维动作，仍可经回环
+// HTTP `/api/role/current`、`/api/role/clear` 或手改 `state/current-role.json`。
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -16,15 +21,6 @@ export function createMcpRolecardServer({ role }) {
     { name: z.string().optional() },
     async (args) => ok(role.get(args)),
   );
-
-  server.tool(
-    'role_set_current',
-    '切换当前人格卡（必须已存在）。',
-    { name: z.string().min(1) },
-    async (args) => ok(role.setCurrent(args)),
-  );
-
-  server.tool('role_clear_current', '清除当前人格卡（之后不再注入人格段）。', {}, async () => ok(role.clearCurrent()));
 
   server.tool(
     'role_sections',
